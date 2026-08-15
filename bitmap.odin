@@ -27,11 +27,15 @@ not affect this []u8 layout.
 A Bitmap returned by bitmap_make or bitmap_clone owns its storage. Release that
 storage with bitmap_destroy. A value returned by bitmap_borrow only views memory
 owned by its caller.
+
+Bitmap is a shallow handle. Do not copy an owning Bitmap into multiple variables
+that are destroyed independently; use bitmap_clone when an independent lifetime
+is required. Passing a Bitmap to the procedures in this package does not transfer
+ownership.
 */
 Bitmap :: struct {
 	bytes:     []u8,
 	allocator: runtime.Allocator,
-	owned:     bool,
 }
 
 /*
@@ -40,6 +44,10 @@ readers may access it together, while a writer excludes every other operation.
 Use it when whole-bitmap coordination, a globally consistent snapshot, or a
 mutex-protected view over existing byte storage is more important than the cost
 of locking each operation.
+
+The mutex only coordinates operations performed through the same
+Thread_Safe_Bitmap. Aliases to borrowed storage and unsafe data views are not
+covered by it.
 
 Each public operation acquires and releases the lock independently. A sequence
 such as get followed by set is not one atomic transaction.
@@ -68,7 +76,6 @@ bitmap_make :: proc(bit_count: int, allocator := context.allocator) -> Bitmap {
 	return {
 		bytes     = make([]u8, byte_count, allocator),
 		allocator = allocator,
-		owned     = true,
 	}
 }
 
@@ -76,7 +83,6 @@ bitmap_make :: proc(bit_count: int, allocator := context.allocator) -> Bitmap {
 bitmap_borrow :: proc(data: []u8) -> Bitmap {
 	return {
 		bytes = data,
-		owned = false,
 	}
 }
 
@@ -85,15 +91,12 @@ bitmap_clone :: proc(data: []u8, allocator := context.allocator) -> Bitmap {
 	return {
 		bytes     = slice.clone(data, allocator),
 		allocator = allocator,
-		owned     = true,
 	}
 }
 
 // bitmap_destroy releases owned storage and resets bitmap to its zero value.
 bitmap_destroy :: proc(bitmap: ^Bitmap) {
-	if bitmap.owned {
-		delete(bitmap.bytes, bitmap.allocator)
-	}
+	delete(bitmap.bytes, bitmap.allocator)
 	bitmap^ = {}
 }
 
@@ -168,7 +171,10 @@ thread_safe_clone :: proc(data: []u8, allocator := context.allocator) -> ^Thread
 
 /*
 thread_safe_borrow allocates a mutex-protected, non-owning view over data.
-The caller must keep data alive until the returned bitmap is destroyed.
+The caller must keep data alive until the returned bitmap is destroyed. While
+concurrent access is possible, all access to data must go through this one
+Thread_Safe_Bitmap; direct access or access through another wrapper is not
+synchronized by its mutex.
 */
 thread_safe_borrow :: proc(data: []u8, allocator := context.allocator) -> ^Thread_Safe_Bitmap {
 	result := new(Thread_Safe_Bitmap, allocator)
@@ -227,11 +233,10 @@ thread_safe_clone_data :: proc(
 /*
 thread_safe_data_unsafe exposes the underlying byte slice.
 
-The view becomes unsafe to read or write as soon as another thread can access
-the bitmap. Prefer thread_safe_clone_data for a stable snapshot.
+This procedure does not retain a lock after returning. Only access the view when
+the caller can guarantee that no other thread is accessing the bitmap. Prefer
+thread_safe_clone_data for a stable snapshot.
 */
 thread_safe_data_unsafe :: proc(bitmap: ^Thread_Safe_Bitmap) -> []u8 {
-	sync.rw_mutex_shared_lock(&bitmap.mutex)
-	defer sync.rw_mutex_shared_unlock(&bitmap.mutex)
 	return bitmap_data(bitmap.bitmap)
 }

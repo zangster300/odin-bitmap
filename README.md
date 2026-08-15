@@ -21,6 +21,12 @@ main :: proc() {
 
 Bits use least-significant-bit-first ordering within each byte. Requested lengths are rounded up to whole bytes, matching the storage semantics of the source package.
 
+## Ownership and borrowing
+
+Values returned by `bitmap_make`, `bitmap_clone`, `concurrent_make`, and `concurrent_clone` own their storage and must be destroyed exactly once. They are shallow handles: use `bitmap_clone` or `concurrent_clone` when an independent lifetime is needed instead of copying an owning value.
+
+`bitmap_borrow` and `thread_safe_borrow` do not own the supplied bytes. The caller must keep those bytes alive. A `Thread_Safe_Bitmap` only synchronizes operations made through that particular wrapper; direct access to the borrowed slice or access through a second wrapper must not occur concurrently.
+
 ## Choosing a bitmap
 
 | Type | Synchronization | Use when |
@@ -33,6 +39,8 @@ Bits use least-significant-bit-first ordering within each byte. Requested length
 
 `Concurrent_Bitmap` avoids a bitmap-wide mutex. Each bit operation is atomic, but a sequence of operations is not one transaction, and a snapshot is only consistent one word at a time.
 
+Construct one with `concurrent_make`, or use `concurrent_clone` to copy an existing byte layout into aligned atomic storage. There is intentionally no concurrent borrowing operation because an arbitrary byte slice cannot guarantee the alignment required by atomic `u32` operations.
+
 ## Concurrent example
 
 ```odin
@@ -43,7 +51,7 @@ bitmap.concurrent_set(&bits, 42, true)
 assert(bitmap.concurrent_get(&bits, 42))
 ```
 
-Use `concurrent_clone_data` for a snapshot. `concurrent_data_unsafe` directly exposes the backing bytes and must not be accessed while another thread updates the bitmap.
+Use `concurrent_clone_data` for a snapshot. `thread_safe_data_unsafe` and `concurrent_data_unsafe` directly expose backing bytes and must only be used when the caller can guarantee exclusive access.
 
 ## Ack
 

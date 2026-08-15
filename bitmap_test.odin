@@ -1,11 +1,18 @@
 package bitmap
 
+import "core:mem"
 import "core:testing"
 import "core:thread"
 
 set_alternating_bits :: proc(bitmap: ^Concurrent_Bitmap, first_bit: int) {
 	for bit_index := first_bit; bit_index < concurrent_bit_len(bitmap); bit_index += 2 {
 		concurrent_set(bitmap, bit_index, true)
+	}
+}
+
+set_alternating_bits_thread_safe :: proc(bitmap: ^Thread_Safe_Bitmap, first_bit: int) {
+	for bit_index := first_bit; bit_index < thread_safe_bit_len(bitmap); bit_index += 2 {
+		thread_safe_set(bitmap, bit_index, true)
 	}
 }
 
@@ -103,15 +110,54 @@ test_thread_safe_bitmap :: proc(t: ^testing.T) {
 @(test)
 test_thread_safe_borrow :: proc(t: ^testing.T) {
 	data := []u8{0, 0}
-	first := thread_safe_borrow(data)
-	second := thread_safe_borrow(data)
-	defer thread_safe_destroy(first)
-	defer thread_safe_destroy(second)
+	borrowed := thread_safe_borrow(data)
+	thread_safe_set(borrowed, 4, true)
+	testing.expect(t, thread_safe_get(borrowed, 4))
+	thread_safe_destroy(borrowed)
+	testing.expect(t, get_bit(data[0], 4))
 
-	thread_safe_set(first, 4, true)
-	testing.expect(t, thread_safe_get(second, 4))
-	thread_safe_set(second, 4, false)
-	testing.expect(t, !thread_safe_get(first, 4))
+	cloned := thread_safe_clone(data)
+	defer thread_safe_destroy(cloned)
+	data[0] = 0
+	testing.expect(t, thread_safe_get(cloned, 4))
+}
+
+@(test)
+test_custom_allocator_lifetimes :: proc(t: ^testing.T) {
+	tracker: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&tracker, context.allocator)
+	defer mem.tracking_allocator_destroy(&tracker)
+	allocator := mem.tracking_allocator(&tracker)
+
+	plain := bitmap_make(33, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	bitmap_destroy(&plain)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
+
+	cloned := bitmap_clone([]u8{1, 2, 3}, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	bitmap_destroy(&cloned)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
+
+	thread_safe := thread_safe_make(33, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	thread_safe_destroy(thread_safe)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
+
+	thread_safe_view := thread_safe_borrow([]u8{1, 2, 3}, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	thread_safe_destroy(thread_safe_view)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
+
+	concurrent := concurrent_make(33, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	concurrent_destroy(&concurrent)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
+
+	concurrent_copy := concurrent_clone([]u8{1, 2, 3}, allocator)
+	testing.expect(t, tracker.current_memory_allocated > 0)
+	concurrent_destroy(&concurrent_copy)
+	testing.expect_value(t, tracker.current_memory_allocated, i64(0))
 }
 
 @(test)
@@ -149,6 +195,12 @@ test_concurrent_bitmap :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(view), 2)
 	testing.expect(t, get_bit(view[0], 3))
 	testing.expect(t, get_bit(view[1], 4))
+
+	cloned := concurrent_clone(snapshot)
+	defer concurrent_destroy(&cloned)
+	concurrent_set(&bitmap, 3, false)
+	testing.expect(t, concurrent_get(&cloned, 3))
+	testing.expect(t, concurrent_get(&cloned, 12))
 }
 
 @(test)
@@ -168,5 +220,25 @@ test_concurrent_writers :: proc(t: ^testing.T) {
 
 	for bit_index in 0 ..< concurrent_bit_len(&bitmap) {
 		testing.expect(t, concurrent_get(&bitmap, bit_index))
+	}
+}
+
+@(test)
+test_thread_safe_writers :: proc(t: ^testing.T) {
+	bitmap := thread_safe_make(128)
+	defer thread_safe_destroy(bitmap)
+
+	even := thread.create_and_start_with_poly_data2(bitmap, 0, set_alternating_bits_thread_safe)
+	odd := thread.create_and_start_with_poly_data2(bitmap, 1, set_alternating_bits_thread_safe)
+	defer if even != nil {thread.destroy(even)}
+	defer if odd != nil {thread.destroy(odd)}
+
+	if !testing.expect(t, even != nil && odd != nil, "could not create worker threads") {
+		return
+	}
+	thread.join_multiple(even, odd)
+
+	for bit_index in 0 ..< thread_safe_bit_len(bitmap) {
+		testing.expect(t, thread_safe_get(bitmap, bit_index))
 	}
 }

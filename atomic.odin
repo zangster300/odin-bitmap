@@ -26,6 +26,10 @@ whole-bitmap serialization for each operation is required.
 
 The public length has byte granularity. Aligned u32 words provide the backing
 storage, and unused high bits of the final word remain private padding.
+
+Concurrent_Bitmap is a shallow owning handle. Do not copy it into multiple
+variables that are destroyed independently. All threads using a bitmap must
+finish before concurrent_destroy is called.
 */
 Concurrent_Bitmap :: struct {
 	words:      Atomic_Bitmap_Words,
@@ -80,7 +84,27 @@ concurrent_make :: proc(bit_count: int, allocator := context.allocator) -> Concu
 	}
 }
 
-// concurrent_destroy releases a concurrent bitmap's storage.
+/*
+concurrent_clone copies data into a new concurrent bitmap. The observable byte
+layout and length match data; private padding rounds the allocation up to a
+whole u32 word.
+*/
+concurrent_clone :: proc(data: []u8, allocator := context.allocator) -> Concurrent_Bitmap {
+	byte_count := len(data)
+	word_count := (byte_count + 3) / 4
+	result := Concurrent_Bitmap{
+		words      = make([]u32, word_count, allocator),
+		byte_count = byte_count,
+		allocator  = allocator,
+	}
+	copy(slice.to_bytes(result.words)[:byte_count], data)
+	return result
+}
+
+/*
+concurrent_destroy releases a concurrent bitmap's storage. The caller must
+ensure that no other thread is using bitmap.
+*/
 concurrent_destroy :: proc(bitmap: ^Concurrent_Bitmap) {
 	delete(bitmap.words, bitmap.allocator)
 	bitmap^ = {}
